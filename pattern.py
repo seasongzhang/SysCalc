@@ -2,6 +2,7 @@
 
 from __future__ import division
 import numpy as np
+import pandas as pd
 
 
 class Pattern:
@@ -15,7 +16,9 @@ class Pattern:
         self.spd = float(spd)
 
         # 根据曳引机的型号来判断是否是高速梯，并结合速度来选取圆角表格
+
         power = mtype.split('-')[1][1:4]
+
         try:
             is_low_spd = int(power) < 400
         except ValueError:
@@ -31,17 +34,16 @@ class Pattern:
             self.t = {'t1': 0.6, 't3': 0.6, 't5': 0.6, 't7': 0.6}
 
     def calc_by_distance(self, distance):
-        """
-        
-        :param distance: 
-        :return: 
-        根据在Mathmatica中的计算，针对唐启峰提供的3套加速度/减速度/圆角时间的参数，若仅保证4段圆角时间，3套参数对应的
+        """根据在Mathmatica中的计算，针对唐启峰提供的3套加速度/减速度/圆角时间的参数，若仅保证4段圆角时间，3套参数对应的
         行程分别为0.432m/1.024m/1.736m。因此，只要保证层间距大于1.736m，单次行程就必然包含完整的4个圆角，这在一定程
         度上简化了模型（计算）。基于行程的计算流程为：
         a. 判断行程是否能保证4段圆角时间
         b. 判断计算所得的额定速度运行距离s_uniform是否大于0？
             b1. 若>0，直接计算匀速运行时间；
             b2. 若<0，说明在该行程下系统无法达到额定速度，得根据3phase的计算方式得到分段时间。
+        
+        :param distance: 
+        :return: 
         """
         # 为计算公式方便，创建本地变量
         d = distance
@@ -150,24 +152,50 @@ class Pattern:
         periods = [self.t[k] for k in sorted(self.t.keys())]
         return [self.acc, self.dec] + periods
 
-        # def clac_by_method(self):
-        #     if self.method == 'sph':
-        #         self.calc_by_sph()
-        #     elif self.method == 'tr':
-        #         self.calc_by_tr()
-        #     elif self.method == 'distance':
-        #         self.calc_by_distance(distance=3)
+
+class PatternFrame:
+    def __init__(self, motor_path, result_path):
+        df_low_spd = pd.read_excel(motor_path, sheetname=1, skiprows=3)
+        df_high_spd = pd.read_excel(motor_path, sheetname=2, skiprows=3)
+        self.df = pd.concat([df_low_spd, df_high_spd])[['MTYPE', 'SPD']]
+        self.writer = pd.ExcelWriter(result_path)
+
+    def dump_by_distance(self, distance=3.0):
+        df = self.df.copy()
+        df['distance'] = distance
+        pat_segs = df.apply(lambda s: Pattern(s.MTYPE, s.SPD).calc_by_distance(distance), axis=1)
+        pat_segs = pd.DataFrame(list(pat_segs.values))  # 若不用list转成list类型，则会保持ndarray类型，没法df
+        pat_segs.columns = ['acc', 'dec'] + ['t%i' % i for i in np.arange(1, 9)]
+        df.join(pat_segs).to_excel(self.writer, 'distance=%.1f' % distance)
+
+    def dump_by_tr(self, tr, load_ratio):
+        df = self.df.copy()
+        df['tr'] = tr
+        df['load_ratio'] = load_ratio
+        pat_segs = df.apply(lambda s: Pattern(s.MTYPE, s.SPD).calc_by_tr(tr, load_ratio), axis=1)
+        pat_segs = pd.DataFrame(list(pat_segs.values))  # 若不用list转成list类型，则会保持ndarray类型，没法df
+        pat_segs.columns = ['acc', 'dec'] + ['t%i' % i for i in np.arange(1, 9)]
+        df.join(pat_segs).to_excel(self.writer, 'tr=%d with lr=%.1f' % (tr, load_ratio))
+
+    def dump_by_sph(self, sph, load_ratio):
+        df = self.df.copy()
+        df['sph'] = sph
+        df['load_ratio'] = load_ratio
+        pat_segs = df.apply(lambda s: Pattern(s.MTYPE, s.SPD).calc_by_sph(sph, load_ratio), axis=1)
+        pat_segs = pd.DataFrame(list(pat_segs.values))  # 若不用list转成list类型，则会保持ndarray类型，没法df
+        pat_segs.columns = ['acc', 'dec'] + ['t%i' % i for i in np.arange(1, 9)]
+        df.join(pat_segs).to_excel(self.writer, 'sph=%d with lr=%.1f' % (sph, load_ratio))
+
+    def dump_all(self):
+        self.dump_by_distance()
+        self.dump_by_tr(tr=100, load_ratio=0.5)
+        self.dump_by_sph(sph=210, load_ratio=0.5)
+        self.writer.save()
 
 
 if __name__ == "__main__":
-    file_path = ur"C:/Users\Seasong\Documents\NutStore\2012_CalTables\00.Ref\003.部件整理\SMEC_Motors_a.xlsx"
-
-    pat = Pattern(mtype='ZPML-GH70', spd='480')
-    pat.calc_by_distance(distance=3)
-
-    # pat.calc_by_sph(sph=180, load_ratio=0.5)
-    # for k in sorted(pat.t.keys()):
-    #     print(k, pat.t[k])
-    # pat.calc_by_tr(tr=250, load_ratio=0.5)
-    # for k in sorted(pat.t.keys()):
-    #     print(k, pat.t[k])
+    motor_path = ur"C:/Users\Seasong\Documents\NutStore\2012_CalTables\00.Ref\003.部件整理\SMEC_Motors_a.xlsx"
+    result_path = ur"tmptmp.xlsx"
+    pf = PatternFrame(motor_path, result_path)
+    pf.dump_all()
+    # Pattern.dump_calc_data(motor_path)
