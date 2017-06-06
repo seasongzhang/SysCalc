@@ -54,6 +54,7 @@ class Pattern:
         t3 = self.t['t3']
         t5 = self.t['t5']
         t7 = self.t['t7']
+        t2 = t4 = t6 = 0
 
         if d < 1.736:  # todo: 针对不同的梯种设置不同的限制
             print(u'不允许单次行程小于1.736m！')
@@ -96,7 +97,8 @@ class Pattern:
         self.t['t8'] = 8
         # print(delta, t2, t4, t6)
         periods = [self.t[k] for k in sorted(self.t.keys())]
-        return [self.acc, self.dec] + periods
+
+        return [self.acc, self.dec] + periods + [self.calc_whole_distance()]
 
     def calc_by_tr(self, tr, load_ratio=0.5):
         """
@@ -110,7 +112,7 @@ class Pattern:
         t_total = sum(self.t.values()) / load_ratio
         self.t['t8'] = t_total * (1 - load_ratio)
         periods = [self.t[k] for k in sorted(self.t.keys())]
-        return [self.acc, self.dec] + periods
+        return [self.acc, self.dec] + periods + [self.calc_whole_distance()]
 
     def calc_by_sph(self, sph=180, load_ratio=0.5):
         """
@@ -150,52 +152,83 @@ class Pattern:
         self.t['t6'] = t6
         self.t['t8'] = t8
         periods = [self.t[k] for k in sorted(self.t.keys())]
-        return [self.acc, self.dec] + periods
+        return [self.acc, self.dec] + periods + [self.calc_whole_distance()]
+
+    def calc_whole_distance(self):
+        # 基于加减速度和各阶段时长，计算总行程
+        acc = self.acc
+        dec = self.dec
+
+        wd = 0
+        wd += acc / 6 * (self.t['t1'] ** 2)
+        wd += acc / 2 * (self.t['t1'] + self.t['t2']) * self.t['t2']
+        wd += acc * (self.t['t1'] / 2 + self.t['t2'] + self.t['t3'] / 3) * self.t['t3']
+        v = acc / 2 * (self.t['t1'] + self.t['t2'] * 2 + self.t['t3'])
+        wd += v * self.t['t4']
+        wd += v * self.t['t5'] - dec / 6 * (self.t['t5'] ** 2)
+        wd += self.t['t6'] * (v - dec / 2 * self.t['t5'] - dec / 2 * self.t['t6'])
+        wd += dec / 6 * (self.t['t7'] ** 2)
+
+        return wd
 
 
 class PatternFrame:
-    def __init__(self, motor_path, result_path):
-        df_low_spd = pd.read_excel(motor_path, sheetname=1, skiprows=3)
-        df_high_spd = pd.read_excel(motor_path, sheetname=2, skiprows=3)
-        self.df = pd.concat([df_low_spd, df_high_spd])[['MTYPE', 'SPD']]
-        self.writer = pd.ExcelWriter(result_path)
+    def __init__(self, src_path):
+        # 输入必须是SMEC_motor_a.xlsx的格式
+        try:
+            df_low_spd = pd.read_excel(src_path, sheetname=1, skiprows=3)
+            df_high_spd = pd.read_excel(src_path, sheetname=2, skiprows=3)
+            self.df = pd.concat([df_low_spd, df_high_spd])[['MTYPE', 'SPD']]
+        except:  # todo: 确认错误类型
+            print(u"作为曳引机型号和速度的输入表格的路径或格式有误！")
 
-    def dump_by_distance(self, distance=3.0):
-        df = self.df.copy()
-        df['distance'] = distance
-        pat_segs = df.apply(lambda s: Pattern(s.MTYPE, s.SPD).calc_by_distance(distance), axis=1)
-        pat_segs = pd.DataFrame(list(pat_segs.values))  # 若不用list转成list类型，则会保持ndarray类型，没法df
-        pat_segs.columns = ['acc', 'dec'] + ['t%i' % i for i in np.arange(1, 9)]
-        df.join(pat_segs).to_excel(self.writer, 'distance=%.1f' % distance)
+    def frame(self, method, writer, **kwargs):
+        df = self.df.copy().drop_duplicates()
+        df.index = range(len(df))
+        # print(df)
+        try:
+            if method == "distance":
+                distance = kwargs['distance']
+                pat_segs = df.apply(lambda s: Pattern(s.MTYPE, s.SPD).calc_by_distance(distance), axis=1)
+                label = 'distance_{0:.2f}'.format(distance)
+                # print(pat_segs)
+            elif method == 'tr':
+                tr = kwargs['tr']
+                lr = kwargs['load_ratio']
+                df['tr'] = tr
+                df['load_ratio'] = lr
+                pat_segs = df.apply(lambda s: Pattern(s.MTYPE, s.SPD).calc_by_tr(tr, lr), axis=1)
+                label = 'tr_{0:.1f}_{1:d}%'.format(tr, int(lr * 100))
+            elif method == 'sph':
+                sph = kwargs['sph']
+                lr = kwargs['load_ratio']
+                df['sph'] = sph
+                df['load_ratio'] = lr
+                pat_segs = df.apply(lambda s: Pattern(s.MTYPE, s.SPD).calc_by_sph(sph, lr), axis=1)
+                label = 'sph_{0:d}_{1:d}%'.format(sph, int(lr * 100))
+            else:
+                print("速度曲线计算方法中没有" + str(method))
+            pat_segs = pd.DataFrame(list(pat_segs.values))  # 若不用list转成list类型，则会保持ndarray类型，没法df
+            pat_segs.columns = ['acc', 'dec'] + ['t%i' % i for i in np.arange(1, 9)] + ['wd']
+            df = df.join(pat_segs)
+        except KeyError:
+            print("method对应的变量参数名有误！")
 
-    def dump_by_tr(self, tr, load_ratio):
-        df = self.df.copy()
-        df['tr'] = tr
-        df['load_ratio'] = load_ratio
-        pat_segs = df.apply(lambda s: Pattern(s.MTYPE, s.SPD).calc_by_tr(tr, load_ratio), axis=1)
-        pat_segs = pd.DataFrame(list(pat_segs.values))  # 若不用list转成list类型，则会保持ndarray类型，没法df
-        pat_segs.columns = ['acc', 'dec'] + ['t%i' % i for i in np.arange(1, 9)]
-        df.join(pat_segs).to_excel(self.writer, 'tr=%d with lr=%.1f' % (tr, load_ratio))
+        if writer:
+            try:
+                df.to_excel(writer, sheet_name=label)
+            except:
+                pass
 
-    def dump_by_sph(self, sph, load_ratio):
-        df = self.df.copy()
-        df['sph'] = sph
-        df['load_ratio'] = load_ratio
-        pat_segs = df.apply(lambda s: Pattern(s.MTYPE, s.SPD).calc_by_sph(sph, load_ratio), axis=1)
-        pat_segs = pd.DataFrame(list(pat_segs.values))  # 若不用list转成list类型，则会保持ndarray类型，没法df
-        pat_segs.columns = ['acc', 'dec'] + ['t%i' % i for i in np.arange(1, 9)]
-        df.join(pat_segs).to_excel(self.writer, 'sph=%d with lr=%.1f' % (sph, load_ratio))
-
-    def dump_all(self):
-        self.dump_by_distance()
-        self.dump_by_tr(tr=100, load_ratio=0.5)
-        self.dump_by_sph(sph=210, load_ratio=0.5)
-        self.writer.save()
+        return df
 
 
 if __name__ == "__main__":
-    motor_path = ur"C:/Users\Seasong\Documents\NutStore\2012_CalTables\00.Ref\003.部件整理\SMEC_Motors_a.xlsx"
-    result_path = ur"tmptmp.xlsx"
-    pf = PatternFrame(motor_path, result_path)
-    pf.dump_all()
-    # Pattern.dump_calc_data(motor_path)
+    # src_path = ur"D:\Prjts\2012_CalTables\00.Ref\003.部件整理\SMEC_Motors_a.xlsx"
+    src_path = ur"D:\Prjts\2012_CalTables\00.Ref\000.系统计算用表\SMEC_Motors_a.xlsx"
+    pf = PatternFrame(src_path)
+    writer = pd.ExcelWriter('patterns.xlsx')
+    pf.frame(method='distance', writer=writer, distance=3.0)
+    pf.frame(method='tr', writer=writer, tr=100, load_ratio=.5)
+    pf.frame(method='sph', writer=writer, sph=180, load_ratio=.5)
+    writer.save()
